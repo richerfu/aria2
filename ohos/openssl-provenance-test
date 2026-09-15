@@ -1,0 +1,79 @@
+#!/bin/sh
+# Metadata-only regression fixtures; never edit producer source or input stage.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+SOURCE=$1
+NATIVE=$2
+HOST=$3
+ABI=$4
+if [ -d "$NATIVE/native" ]; then NATIVE=$NATIVE/native; fi
+FIXTURES=$(mktemp -d "${TMPDIR:-/tmp}/aria2-openssl-provenance.XXXXXX")
+find "$SOURCE" -type f -exec shasum -a 256 {} + | LC_ALL=C sort > "$FIXTURES/input-before.sha256"
+(cd "$SOURCE" && shasum -a 256 -c SHA256SUMS) > "$FIXTURES/input-checksums.log"
+cp -R "$SOURCE" "$FIXTURES/legacy-input"
+mv "$FIXTURES/legacy-input/notices/OpenSSL-LICENSE.txt" \
+  "$FIXTURES/legacy-input/notices/OpenSSL-1.1.1w-LICENSE.txt"
+"$ROOT/ohos/artifact-manifest" "$FIXTURES/legacy-input" "$NATIVE" "$HOST" "$ABI" \
+  > "$FIXTURES/legacy-input.log" 2>&1
+test ! -e "$FIXTURES/legacy-input/notices/OpenSSL-1.1.1w-LICENSE.txt"
+HEADER=$(grep OPENSSL_VERSION_TEXT "$FIXTURES/legacy-input/notices/OpenSSL-opensslv.h")
+NUMBER=$(grep OPENSSL_VERSION_NUMBER "$FIXTURES/legacy-input/notices/OpenSSL-opensslv.h")
+test "$(awk '$2 == "OpenSSL-LICENSE.txt" {print $1}' "$ROOT/ohos/dependencies.sha256")" = \
+  c32913b33252e71190af2066f08115c69bc9fddadf3bf29296e20c835389841c
+# Exercise the exact Docker jq expression without Docker/dependency builds.
+# The pinned header is the input; never infer a released version from a name.
+DOCKER_METADATA=$(sed -n "/'{openssl:/p" "$ROOT/Dockerfile.ohos" |
+  sed "s/^[[:space:]]*'//; s/'[[:space:]]*\\\\$//")
+jq -n --arg ref 0f7849a999d3c69f8d2ed23bf5f8d680a2aac6be \
+  --arg header "$HEADER" "$DOCKER_METADATA" > "$FIXTURES/docker-dependencies.json"
+jq -e --arg header "$HEADER" '.openssl.version_header == $header and
+  .openssl.version == null and
+  .openssl.upstream_revision == "b372b1f76450acdfed1e2301a39810146e28b02c"' \
+  "$FIXTURES/docker-dependencies.json" > "$FIXTURES/docker-header.log"
+jq -e --arg header "$HEADER" --arg number "$NUMBER" \
+  '.dependencies.openssl.version_header == $header and
+   .dependencies.openssl.version_number_header == $number and
+   .dependencies.openssl.version == null and
+   .dependencies.openssl.license_artifact.path == "notices/OpenSSL-LICENSE.txt" and
+   .dependencies.openssl.license_artifact.sha256 == "c32913b33252e71190af2066f08115c69bc9fddadf3bf29296e20c835389841c" and
+   .validated_min_api == null and .validation.device == "NOT RUN" and
+   .validation.security_release == "NOT ACCEPTED"' \
+  "$FIXTURES/legacy-input/artifact-manifest.json" > "$FIXTURES/derived-header.log"
+for variant in bad-version-header false-release-label changed-license wrong-revision changed-header; do
+  CASE_DIR=$FIXTURES/$variant
+  mkdir "$CASE_DIR"
+  cp -R "$SOURCE" "$CASE_DIR/input"
+  case "$variant" in
+    bad-version-header)
+      jq '.openssl.version_header = "OpenSSL 1.1.1w"' "$CASE_DIR/input/dependencies.json" \
+        > "$CASE_DIR/input/dependencies.json.tmp"
+      mv "$CASE_DIR/input/dependencies.json.tmp" "$CASE_DIR/input/dependencies.json"
+      ;;
+    false-release-label)
+      jq '.openssl.version = "1.1.1w"' "$CASE_DIR/input/dependencies.json" \
+        > "$CASE_DIR/input/dependencies.json.tmp"
+      mv "$CASE_DIR/input/dependencies.json.tmp" "$CASE_DIR/input/dependencies.json"
+      ;;
+    changed-license)
+      printf '\nchanged license rejection fixture\n' >> "$CASE_DIR/input/notices/OpenSSL-LICENSE.txt"
+      ;;
+    wrong-revision)
+      jq '.openssl.upstream_revision = "0000000000000000000000000000000000000000"' \
+        "$CASE_DIR/input/dependencies.json" > "$CASE_DIR/input/dependencies.json.tmp"
+      mv "$CASE_DIR/input/dependencies.json.tmp" "$CASE_DIR/input/dependencies.json"
+      ;;
+    changed-header)
+      printf '\nchanged header rejection fixture\n' >> "$CASE_DIR/input/notices/OpenSSL-opensslv.h"
+      ;;
+  esac
+  if "$ROOT/ohos/artifact-manifest" "$CASE_DIR/input" "$NATIVE" "$HOST" "$ABI" \
+    > "$CASE_DIR/manifest.log" 2>&1; then
+    echo "manifest unexpectedly accepted $variant" >&2
+    exit 1
+  fi
+  grep -q 'OpenSSL provenance rejected:' "$CASE_DIR/manifest.log"
+  echo "OpenSSL provenance rejected $variant"
+done
+find "$SOURCE" -type f -exec shasum -a 256 {} + | LC_ALL=C sort > "$FIXTURES/input-after.sha256"
+cmp "$FIXTURES/input-before.sha256" "$FIXTURES/input-after.sha256"
+echo "actual-header metadata and exact license verified; input unchanged; fixtures retained: $FIXTURES"

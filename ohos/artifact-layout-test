@@ -1,0 +1,65 @@
+#!/bin/sh
+# Owner/reviewer regression test: distribution native libraries are real files.
+# Invalid candidates live in isolated retained fixtures; source is never edited.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+SOURCE=$1
+NATIVE=$2
+HOST=$3
+ABI=$4
+if [ -d "$NATIVE/native" ]; then NATIVE=$NATIVE/native; fi
+case "$ABI" in
+  arm64-v8a) ARCH=aarch64 ;;
+  armeabi-v7a) ARCH=armv7 ;;
+  x86_64) ARCH=x86_64 ;;
+  *) echo "unsupported ABI: $ABI" >&2; exit 1 ;;
+esac
+if [ ! -f "$SOURCE/lib/libaria2.so" ] || [ -L "$SOURCE/lib/libaria2.so" ] || \
+  [ -e "$SOURCE/libaria2.so" ] || [ -L "$SOURCE/libaria2.so" ] || \
+  [ -n "$(find "$SOURCE" -type l -print)" ] || \
+  [ -n "$(find "$SOURCE" -name 'libaria2.so.*' -print)" ]; then
+  echo 'valid input must have ordinary lib/libaria2.so without aliases' >&2
+  exit 1
+fi
+jq -e '.library.path == "lib/libaria2.so" and
+  .artifact_layout.shared_library == "regular-file" and
+  .artifact_layout.symlinks == false' "$SOURCE/artifact-manifest.json" >/dev/null
+FIXTURES=$(mktemp -d "${TMPDIR:-/tmp}/aria2-regular-layout.XXXXXX")
+for variant in library-symlink unrelated-symlink versioned-file top-level-alias; do
+  CASE_DIR=$FIXTURES/$variant
+  mkdir -p "$CASE_DIR"
+  cp -R "$SOURCE" "$CASE_DIR/input"
+  case "$variant" in
+    library-symlink)
+      mv "$CASE_DIR/input/lib/libaria2.so" "$CASE_DIR/input/lib/engine.bin"
+      ln -s engine.bin "$CASE_DIR/input/lib/libaria2.so"
+      ;;
+    unrelated-symlink)
+      ln -s libc++_shared.so "$CASE_DIR/input/lib/runtime-alias"
+      ;;
+    versioned-file)
+      cp "$CASE_DIR/input/lib/libaria2.so" "$CASE_DIR/input/lib/libaria2.so.1.37.0"
+      ;;
+    top-level-alias)
+      cp "$CASE_DIR/input/lib/libaria2.so" "$CASE_DIR/input/libaria2.so"
+      ;;
+  esac
+  if "$ROOT/ohos/artifact-manifest" "$CASE_DIR/input" "$NATIVE" "$HOST" "$ABI" \
+    > "$CASE_DIR/manifest.log" 2>&1; then
+    echo "manifest unexpectedly accepted $variant" >&2
+    exit 1
+  fi
+  grep -q 'delivery requires ordinary lib/libaria2.so' "$CASE_DIR/manifest.log"
+  if OHOS_OUT_DIR="$CASE_DIR/input" OHOS_PACKAGE_DIR="$CASE_DIR/packages" \
+    "$ROOT/ohos-release" "$ARCH" > "$CASE_DIR/package.log" 2>&1; then
+    echo "packager unexpectedly accepted $variant" >&2
+    exit 1
+  fi
+  grep -q 'package requires ordinary lib/libaria2.so' "$CASE_DIR/package.log"
+  if [ -e "$CASE_DIR/packages" ]; then
+    echo "rejected fixture created distribution output: $variant" >&2
+    exit 1
+  fi
+  echo "manifest and package rejected $variant before distribution creation"
+done
+echo "ordinary-file layout verified; invalid fixtures retained: $FIXTURES"

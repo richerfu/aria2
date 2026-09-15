@@ -44,3 +44,9 @@ compile
 main.log
 main.trs
 test-suite.log
+ohos-build/
+ohos-out/
+ohos-deps/
+ohos-downloads/
+host-build/
+ohos-packages/

@@ -104,6 +104,7 @@ int libraryInit()
 int libraryDeinit()
 {
   delete platform;
+  platform = nullptr;
   return 0;
 }
 

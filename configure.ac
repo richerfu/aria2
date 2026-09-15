@@ -19,6 +19,19 @@ dnl  http://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.
 AC_SUBST(LT_CURRENT, 0)
 AC_SUBST(LT_REVISION, 0)
 AC_SUBST(LT_AGE, 0)
+case "$host" in
+  *linux-ohos*)
+    LIBARIA2_VERSION_FLAGS="-avoid-version -Wl,-soname,libaria2.so"
+    ARIA2_CLI_LDFLAGS="-static -pie"
+    ARIA2_CLI_CXXFLAGS="-fPIE"
+    ARIA2_CLI_LIBS='$(EXTLDADD)'
+    ;;
+  *) LIBARIA2_VERSION_FLAGS="-version-info $LT_CURRENT:$LT_REVISION:$LT_AGE" ;;
+esac
+AC_SUBST([LIBARIA2_VERSION_FLAGS])
+AC_SUBST([ARIA2_CLI_LDFLAGS])
+AC_SUBST([ARIA2_CLI_CXXFLAGS])
+AC_SUBST([ARIA2_CLI_LIBS])
 
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([src/a2io.h])

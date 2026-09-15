@@ -9,7 +9,9 @@ EXTRA_DIST = config.rpath \
 	     mingw-config mingw-release mingw-build-memo \
 	     android-config \
 	     ohos-config ohos-release \
-	     ohos/generic-config ohos/zlib-config \
+	     ohos/generic-config ohos/zlib-config ohos/host-c-api-test \
+	     ohos/build-deps ohos/artifact-manifest ohos/dependencies.sha256 \
+	     test/aria2_c_lifecycle.c \
 	     makerelease-osx.mk osx-package/DS_Store osx-package/etc/paths.d/aria2c osx-package/etc/manpaths.d/aria2 \
 	     Dockerfile.mingw \
 	     Dockerfile.raspberrypi \

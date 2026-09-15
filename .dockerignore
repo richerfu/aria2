@@ -1,0 +1,10 @@
+.git
+ohos-build
+ohos-out
+ohos-deps
+ohos-downloads
+ohos-packages
+host-build
+**/autom4te.cache
+**/.deps
+**/.libs

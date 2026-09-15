@@ -1,0 +1,185 @@
+#!/bin/sh
+# Mechanical artifact/provenance output; never contains options/RPC secrets.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+OUT=$1
+NATIVE=$2
+HOST=$3
+ABI=$4
+LLVM=$NATIVE/llvm/bin
+cd "$ROOT"
+VERSION=$(sed -n 's/^AC_INIT(\[aria2\],\[\([^]]*\)\].*/\1/p' configure.ac)
+if [ ! -f "$OUT/lib/libaria2.so" ] || [ -L "$OUT/lib/libaria2.so" ] || \
+  [ -e "$OUT/libaria2.so" ] || [ -L "$OUT/libaria2.so" ] || \
+  [ -n "$(find "$OUT" -type l -print)" ] || \
+  [ -n "$(find "$OUT" -name 'libaria2.so.*' -print)" ]; then
+  echo 'delivery requires ordinary lib/libaria2.so; symlinks, versioned files and top-level aliases are forbidden' >&2
+  exit 1
+fi
+# The retained PIC prefix is read-only. Normalize only the new staged notice,
+# and bind metadata to the actual header from the pinned producer's prelude.
+# This header digest was verified for all three ABI preludes at OPENSSL_REF.
+OPENSSL_REF=0f7849a999d3c69f8d2ed23bf5f8d680a2aac6be
+OPENSSL_UPSTREAM=b372b1f76450acdfed1e2301a39810146e28b02c
+OPENSSL_HEADER_SHA256=0035c267e11ba05295dcf7af3044a18b16665d5f0489e298263584b6952042c1
+OPENSSL_LICENSE_SHA256=c32913b33252e71190af2066f08115c69bc9fddadf3bf29296e20c835389841c
+OPENSSL_HEADER=$OUT/notices/OpenSSL-opensslv.h
+if [ -f "$OPENSSL_HEADER" ]; then
+  OPENSSL_HEADER_INPUT=$OPENSSL_HEADER
+else
+  : "${OHOS_DEPS_PREFIX:?staging requires the actual OpenSSL header from the read-only dependency prefix}"
+  OPENSSL_HEADER_INPUT=$OHOS_DEPS_PREFIX/include/openssl/opensslv.h
+fi
+if [ "$(shasum -a 256 "$OPENSSL_HEADER_INPUT" | awk '{print $1}')" != "$OPENSSL_HEADER_SHA256" ]; then
+  echo 'OpenSSL provenance rejected: header differs from pinned producer prelude' >&2
+  exit 1
+fi
+OPENSSL_VERSION_HEADER=$(grep OPENSSL_VERSION_TEXT "$OPENSSL_HEADER_INPUT")
+OPENSSL_NUMBER_HEADER=$(grep OPENSSL_VERSION_NUMBER "$OPENSSL_HEADER_INPUT")
+if ! jq -e --arg ref "$OPENSSL_REF" --arg upstream "$OPENSSL_UPSTREAM" \
+  --arg header "$OPENSSL_VERSION_HEADER" \
+  '.openssl.port_revision == $ref and .openssl.upstream_revision == $upstream and
+   .openssl.version_header == $header and .openssl.version == null' \
+  "$OUT/dependencies.json" >/dev/null; then
+  echo 'OpenSSL provenance rejected: revision/version_header does not match actual pinned header; release labels are forbidden' >&2
+  exit 1
+fi
+OPENSSL_LICENSE=$OUT/notices/OpenSSL-LICENSE.txt
+# Compatibility input only: never rename or modify this notice in the prefix.
+OPENSSL_LEGACY_LICENSE=$OUT/notices/OpenSSL-1.1.1w-LICENSE.txt
+if [ -f "$OPENSSL_LICENSE" ] && [ -f "$OPENSSL_LEGACY_LICENSE" ]; then
+  echo 'OpenSSL provenance rejected: ambiguous current and legacy notices' >&2
+  exit 1
+fi
+if [ -f "$OPENSSL_LICENSE" ]; then
+  OPENSSL_LICENSE_INPUT=$OPENSSL_LICENSE
+elif [ -f "$OPENSSL_LEGACY_LICENSE" ]; then
+  OPENSSL_LICENSE_INPUT=$OPENSSL_LEGACY_LICENSE
+else
+  echo 'OpenSSL provenance rejected: pinned upstream license notice missing' >&2
+  exit 1
+fi
+if [ "$(shasum -a 256 "$OPENSSL_LICENSE_INPUT" | awk '{print $1}')" != "$OPENSSL_LICENSE_SHA256" ]; then
+  echo 'OpenSSL provenance rejected: license bytes differ from pinned upstream notice' >&2
+  exit 1
+fi
+if [ "$OPENSSL_LICENSE_INPUT" != "$OPENSSL_LICENSE" ]; then
+  mv "$OPENSSL_LICENSE_INPUT" "$OPENSSL_LICENSE"
+fi
+if [ "$OPENSSL_HEADER_INPUT" != "$OPENSSL_HEADER" ]; then
+  cp "$OPENSSL_HEADER_INPUT" "$OPENSSL_HEADER"
+fi
+# The old prefix's source-pin notice may also use the legacy filename. Refresh
+# this new staged notice from current producer pins, keeping all digest bytes.
+cp "$ROOT/ohos/dependencies.sha256" "$OUT/notices/dependency-source-sha256.txt"
+jq --arg number "$OPENSSL_NUMBER_HEADER" --arg header_sha "$OPENSSL_HEADER_SHA256" \
+  --arg license_sha "$OPENSSL_LICENSE_SHA256" --arg upstream "$OPENSSL_UPSTREAM" \
+  '.openssl += {version_number_header:$number,
+    header_artifact:{path:"notices/OpenSSL-opensslv.h",sha256:$header_sha},
+    license_artifact:{path:"notices/OpenSSL-LICENSE.txt",sha256:$license_sha,
+      upstream_revision:$upstream}}' "$OUT/dependencies.json" > "$OUT/dependencies.json.tmp"
+mv "$OUT/dependencies.json.tmp" "$OUT/dependencies.json"
+for name in lib/libaria2.so lib/libc++_shared.so aria2c; do
+  label=$(echo "$name" | tr / _)
+  "$LLVM/llvm-readelf" -h -d "$OUT/$name" > "$OUT/evidence/$label.elf.txt"
+  "$LLVM/llvm-nm" -D --defined-only "$OUT/$name" > "$OUT/evidence/$label.exports.txt"
+  "$LLVM/llvm-nm" -D --undefined-only "$OUT/$name" > "$OUT/evidence/$label.undefined.txt"
+done
+case "$ABI" in
+  arm64-v8a) MACHINE=AArch64 ;;
+  armeabi-v7a) MACHINE=ARM ;;
+  x86_64) MACHINE='Advanced Micro Devices X86-64' ;;
+  *) echo "unsupported ABI: $ABI" >&2; exit 1 ;;
+esac
+grep -q "Machine:.*$MACHINE" "$OUT/evidence/lib_libaria2.so.elf.txt"
+grep -q 'SONAME.*\[libaria2.so\]' "$OUT/evidence/lib_libaria2.so.elf.txt"
+if grep -q 'NEEDED.*\[libaria2.so\]' "$OUT/evidence/aria2c.elf.txt"; then
+  echo 'CLI must retain its statically embedded engine' >&2
+  exit 1
+fi
+if grep -q TEXTREL "$OUT/evidence/lib_libaria2.so.elf.txt"; then
+  echo 'TEXTREL is forbidden' >&2
+  exit 1
+fi
+for symbol in abi_version initialize run_once shutdown finalize; do
+  grep -q " T aria2_c_$symbol$" "$OUT/evidence/lib_libaria2.so.exports.txt"
+done
+if grep -q 'OH_Ability_' "$OUT/evidence/lib_libaria2.so.undefined.txt"; then
+  echo 'process API dependency is forbidden' >&2
+  exit 1
+fi
+sed -n 's/.*NEEDED.*\[\([^]]*\)\].*/\1/p' "$OUT"/evidence/*.elf.txt |
+  LC_ALL=C sort -u > "$OUT/evidence/runtime-needed.txt"
+while IFS= read -r dependency; do
+  case "$dependency" in
+    libc.so) ;;
+    *)
+      if [ ! -f "$OUT/lib/$dependency" ]; then
+        echo "unpackaged dynamic dependency: $dependency" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done < "$OUT/evidence/runtime-needed.txt"
+cp AUTHORS COPYING LICENSE.OpenSSL README.ohos "$OUT/notices/"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  BASE=$(git rev-parse HEAD)
+  BRANCH=$(git branch --show-current)
+  PROVENANCE_MODE=git-base-and-dirty-tree
+  git status --porcelain=v1 > "$OUT/evidence/source-status.txt"
+  git diff --binary HEAD > "$OUT/evidence/source-diff.patch"
+  git ls-files --cached --others --exclude-standard | LC_ALL=C sort > "$OUT/evidence/source-files.list"
+else
+  : "${ARIA2_SOURCE_BASE_REVISION:?non-Git/Docker context requires declared immutable base revision}"
+  BASE=$ARIA2_SOURCE_BASE_REVISION
+  BRANCH=${ARIA2_SOURCE_BRANCH:-unknown}
+  PROVENANCE_MODE=declared-base-and-full-context-hash
+  echo 'Git metadata unavailable; declared base is not a claim of clean commit identity. Full source snapshot/hashes are authoritative.' > "$OUT/evidence/source-status.txt"
+  echo 'Git delta unavailable; use source-snapshot.tar.gz and source-files.sha256.' > "$OUT/evidence/source-diff.patch"
+  find . \( -name .git -o -name autom4te.cache -o -name .deps -o -name .libs \
+    -o -name ohos-build -o -name ohos-out -o -name ohos-deps -o -name ohos-downloads \
+    -o -name ohos-packages -o -name host-build \) -prune -o -type f -print |
+    LC_ALL=C sort > "$OUT/evidence/source-files.list"
+fi
+printf '%s\n' "$BASE" > "$OUT/evidence/source-base-revision.txt"
+sed '/^docs\/ohos-shared-library-implementation\.md$/d; /^\.\/docs\/ohos-shared-library-implementation\.md$/d' \
+  "$OUT/evidence/source-files.list" > "$OUT/evidence/source-files.list.tmp"
+mv "$OUT/evidence/source-files.list.tmp" "$OUT/evidence/source-files.list"
+while IFS= read -r source; do
+  if [ -f "$source" ]; then shasum -a 256 "$source"; fi
+done < "$OUT/evidence/source-files.list" > "$OUT/evidence/source-files.sha256"
+tar -czf "$OUT/source-snapshot.tar.gz" -T "$OUT/evidence/source-files.list"
+TREE_HASH=$(shasum -a 256 "$OUT/evidence/source-files.sha256" | awk '{print $1}')
+LIB_HASH=$(shasum -a 256 "$OUT/lib/libaria2.so" | awk '{print $1}')
+CLI_HASH=$(shasum -a 256 "$OUT/aria2c" | awk '{print $1}')
+RUNTIME_HASH=$(shasum -a 256 "$OUT/lib/libc++_shared.so" | awk '{print $1}')
+SDK_HASH=$(shasum -a 256 "$NATIVE/oh-uni-package.json" | awk '{print $1}')
+jq -n --arg version "$VERSION" --arg abi "$ABI" --arg target "$HOST" \
+  --arg base "$BASE" --arg branch "$BRANCH" --arg provenance_mode "$PROVENANCE_MODE" \
+  --arg tree "$TREE_HASH" --arg library_hash "$LIB_HASH" --arg cli_hash "$CLI_HASH" \
+  --arg runtime_hash "$RUNTIME_HASH" \
+  --arg compiler "$("$LLVM/clang" --version)" --arg sdk_hash "$SDK_HASH" \
+  --argjson sdk "$(cat "$NATIVE/oh-uni-package.json")" \
+  --argjson needed "$(jq -Rn '[inputs]' < "$OUT/evidence/runtime-needed.txt")" \
+  --argjson dependencies "$(cat "$OUT/dependencies.json")" \
+  '{manifest_version:1,product:"aria2",version:$version,abi:$abi,target:$target,
+    c_abi_version:1,soname:"libaria2.so",library:{path:"lib/libaria2.so",sha256:$library_hash},
+    artifact_layout:{shared_library:"regular-file",symlinks:false,versioned_library_files:false,top_level_library_alias:false},
+    cli:{path:"aria2c",sha256:$cli_hash},runtime_needed:$needed,
+    runtime_artifacts:[{path:"lib/libc++_shared.so",sha256:$runtime_hash}],
+    runtime_policy:{"libc.so":"OHOS system; API22/runtime proof missing","libc++_shared.so":"packaged from this exact SDK"},
+    requested_min_api:22,validated_min_api:null,api22_status:"MISSING: API26 SDK link is not API22 runtime/undefined-symbol proof",
+    target_sdk:$sdk.apiVersion,sdk:$sdk,sdk_metadata_sha256:$sdk_hash,compiler:$compiler,
+    source:{repository:"https://github.com/richerfu/aria2",base_revision:$base,branch:$branch,provenance_mode:$provenance_mode,
+      dirty:true,tree_files_sha256:$tree,diff:"evidence/source-diff.patch",snapshot:"source-snapshot.tar.gz",
+      excluded_evidence_report:"docs/ohos-shared-library-implementation.md; written after snapshot to avoid self-reference"},
+    dependencies:$dependencies,
+    features:{http:true,https:true,ftp:true,bittorrent:true,metalink:true,xml_rpc:true,json_rpc:true,websocket:true,async_dns:true,sftp:true,gzip:true,nls:false,sqlite:false},
+    rpc:{loopback_only:true,secret:"caller-supplied in-memory >=32 printable bytes; caller owns entropy",port:"caller chooses 1024..65535; no port0 or discovery API",ready:"caller must authenticated-probe; initialize is not Ready"},
+    lifecycle:{single_global_lifecycle_per_process:true,terminal_status:"ARIA2_C_PROCESS_RESTART_REQUIRED",all_calls_same_owner_thread:true,keep_running:true,signal_handler:false,
+      iteration:"upstream RUN_ONCE; idle poll up to ~1s; no hard deadline",shutdown:"owner requests then iterates until running=0 before finalize"},
+    validation:{target_build:"API26 SDK target ELF; PIC/SONAME/symbol/dependency checks passed",device:"NOT RUN",g0_b:"NOT ACCEPTED",security_release:"NOT ACCEPTED"}}' \
+  > "$OUT/artifact-manifest.json"
+(cd "$OUT" && find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort |
+  while IFS= read -r artifact; do shasum -a 256 "$artifact"; done > SHA256SUMS)
+echo "Artifact manifest: $OUT/artifact-manifest.json"

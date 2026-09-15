@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+mkdir -p "$ROOT/host-build"
+BUILD_DIR=$(mktemp -d "$ROOT/host-build/c-api.XXXXXX")
+cd "$ROOT"
+LIBTOOLIZE=${LIBTOOLIZE:-glibtoolize} autoreconf -fi
+cd "$BUILD_DIR"
+"$ROOT/configure" --enable-libaria2 --enable-shared --disable-static \
+  --disable-nls --disable-ssl --without-openssl --without-gnutls \
+  --without-appletls --without-wintls --without-libnettle --without-libgcrypt \
+  --without-libgmp --without-libssh2 --without-libcares --without-sqlite3 \
+  --without-libxml2 --with-libexpat --without-libuv CXXFLAGS="-O1 -g"
+make -C deps -j"${JOBS:-8}"
+make -C src -j"${JOBS:-8}"
+cc -std=c11 -Wall -Wextra -Werror -pthread -I"$ROOT/src/includes" \
+  -c "$ROOT/test/aria2_c_lifecycle.c" -o c-consumer.o
+./libtool --tag=CC --mode=link cc -pthread c-consumer.o src/libaria2.la -o c-consumer
+./c-consumer
+./c-consumer --init-failure "$BUILD_DIR/missing-uri-list.fixture"
+cycle=0
+while [ "$cycle" -lt 100 ]; do
+  ./c-consumer --lifecycle-only
+  cycle=$((cycle + 1))
+done
+echo '100 independent C consumer processes completed; no same-process reinitialization claimed'
+src/aria2c --version
+nm -g src/.libs/libaria2.* | grep aria2_c_
+echo "Host C ABI evidence build: $BUILD_DIR"

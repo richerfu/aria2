@@ -198,8 +198,10 @@ bool Platform::tearDown()
   }
   initialized_ = false;
 
+#ifdef ENABLE_SSL
   SocketCore::setClientTLSContext(nullptr);
   SocketCore::setServerTLSContext(nullptr);
+#endif // ENABLE_SSL
 
 #ifdef HAVE_OPENSSL
 #  if OPENSSL_VERSION_NUMBER >= 0x30000000L

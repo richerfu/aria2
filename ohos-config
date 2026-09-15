@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cross-compile aria2c for one OpenHarmony ABI.
+# Cross-compile shared libaria2 and its CLI for one OpenHarmony ABI.
 #
 # Usage:
 #   OHOS_NDK_HOME=... OHOS_DEPS_PREFIX=... \
@@ -74,10 +74,14 @@ if ! grep -q 'linux-ohos' config.sub; then
   exit 1
 fi
 
-BUILD_DIR=$ROOT/ohos-build/$ABI
-OUT_DIR=$ROOT/ohos-out/$ABI
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR" "$OUT_DIR"
+mkdir -p "$ROOT/ohos-build/$ABI"
+BUILD_DIR=${OHOS_BUILD_DIR:-$(mktemp -d "$ROOT/ohos-build/$ABI/run.XXXXXX")}
+OUT_DIR=${OHOS_OUT_DIR:-$ROOT/ohos-out/$ABI}
+if [ -e "$OUT_DIR" ] || [ -L "$OUT_DIR" ]; then
+  echo "output already exists; set a fresh OHOS_OUT_DIR (nothing deleted)" >&2
+  exit 1
+fi
+mkdir -p "$BUILD_DIR" "$OUT_DIR/lib" "$OUT_DIR/include/aria2" "$OUT_DIR/notices" "$OUT_DIR/evidence"
 
 if command -v nproc >/dev/null 2>&1; then
   JOBS=${JOBS:-$(nproc)}
@@ -104,8 +108,9 @@ PKG_CONFIG_PATH= \
   --host="$HOST" \
   --build="$BUILD" \
   --disable-nls \
-  --disable-shared \
-  --disable-libaria2 \
+  --enable-shared \
+  --enable-static \
+  --enable-libaria2 \
   --without-gnutls \
   --without-appletls \
   --without-wintls \
@@ -119,13 +124,34 @@ PKG_CONFIG_PATH= \
   --without-tcmalloc \
   --without-jemalloc \
   --with-libz \
-  CFLAGS="-Os -fPIE" \
-  CXXFLAGS="-Os -fPIE -stdlib=libc++" \
-  CPPFLAGS="-fPIE -I$PREFIX/include" \
-  LDFLAGS="-pie -L$PREFIX/lib"
+  CFLAGS="-Os -fPIC" \
+  CXXFLAGS="-Os -fPIC -stdlib=libc++" \
+  CPPFLAGS="-I$PREFIX/include" \
+  LDFLAGS="-L$PREFIX/lib -Wl,-z,defs"
 
 make -C deps -j"$JOBS"
-make -C src -j"$JOBS" aria2c
-cp src/aria2c "$OUT_DIR/aria2c"
+make -C src -j"$JOBS"
+if [ -f src/.libs/aria2c ]; then
+  cp src/.libs/aria2c "$OUT_DIR/aria2c"
+else
+  cp src/aria2c "$OUT_DIR/aria2c"
+fi
+# The OHOS libtool target produces this ordinary unversioned file directly.
+# Do not rename it or introduce SONAME/convenience aliases in delivery.
+if [ ! -f src/.libs/libaria2.so ] || [ -L src/.libs/libaria2.so ]; then
+  echo "OHOS shared output must be an ordinary libaria2.so file" >&2
+  exit 1
+fi
+cp src/.libs/libaria2.so "$OUT_DIR/lib/libaria2.so"
 "$TOOLCHAIN/llvm-strip" -s "$OUT_DIR/aria2c"
-echo "built $OUT_DIR/aria2c"
+"$TOOLCHAIN/llvm-strip" --strip-debug "$OUT_DIR/lib/libaria2.so"
+cp "$ROOT/src/includes/aria2/aria2.h" "$ROOT/src/includes/aria2/aria2_c.h" "$OUT_DIR/include/aria2/"
+cp "$NATIVE/llvm/lib/$HOST/libc++_shared.so" "$OUT_DIR/lib/" 2>/dev/null || \
+  cp "$NATIVE/llvm/lib/$(echo "$HOST" | sed 's/-unknown//')/libc++_shared.so" "$OUT_DIR/lib/"
+cp "$NATIVE/NOTICE.txt" "$OUT_DIR/notices/OHOS-SDK-NOTICE.txt"
+cp "$PREFIX"/notices/* "$OUT_DIR/notices/"
+cp "$PREFIX/dependencies.json" "$OUT_DIR/dependencies.json"
+cp config.log config.status "$OUT_DIR/evidence/"
+printf '%s\n' "$BUILD_DIR" > "$OUT_DIR/evidence/build-directory.txt"
+"$ROOT/ohos/artifact-manifest" "$OUT_DIR" "$NATIVE" "$HOST" "$ABI"
+echo "built shared library and CLI: $OUT_DIR (build retained: $BUILD_DIR)"

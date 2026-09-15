@@ -19,10 +19,13 @@ RANLIB=$TOOLCHAIN/llvm-ranlib \
 STRIP=$TOOLCHAIN/llvm-strip \
 PKG_CONFIG_LIBDIR=$OHOS_DEPS_PREFIX/lib/pkgconfig \
 PKG_CONFIG_PATH= \
+CFLAGS="${CFLAGS:--Os -fPIC}" \
+CXXFLAGS="${CXXFLAGS:--Os -fPIC -stdlib=libc++}" \
 ./configure \
   --host="$OHOS_HOST" \
   --build="$OHOS_BUILD" \
   --prefix="$OHOS_DEPS_PREFIX" \
   --disable-shared \
   --enable-static \
+  --with-pic \
   "$@"

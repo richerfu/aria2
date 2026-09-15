@@ -15,6 +15,7 @@ CHOST=$OHOS_HOST \
 CC=$TOOLCHAIN/$OHOS_HOST-clang \
 AR=$TOOLCHAIN/llvm-ar \
 RANLIB=$TOOLCHAIN/llvm-ranlib \
+CFLAGS="${CFLAGS:--Os -fPIC}" \
 ./configure \
   --prefix="$OHOS_DEPS_PREFIX" \
   --libdir="$OHOS_DEPS_PREFIX/lib" \

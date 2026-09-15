@@ -1,0 +1,75 @@
+#!/bin/sh
+# Native Mac or Linux SDK, isolated source/PIC dependency build; no resets.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+: "${OHOS_NDK_HOME:?set native SDK directory}"
+: "${OHOS_OPENSSL_REPO:?set read-only ohos-openssl repository}"
+: "${OHOS_DEPS_PREFIX:?set a fresh dependency prefix}"
+OHOS_HOST=${OHOS_HOST:-aarch64-unknown-linux-ohos}
+OHOS_ABI=${OHOS_ABI:-arm64-v8a}
+OPENSSL_REF=0f7849a999d3c69f8d2ed23bf5f8d680a2aac6be
+DOWNLOADS=${OHOS_DOWNLOADS_DIR:-$ROOT/ohos-downloads}
+if [ -e "$OHOS_DEPS_PREFIX" ]; then
+  echo "dependency prefix exists; select a fresh prefix (nothing deleted)" >&2
+  exit 1
+fi
+mkdir -p "$DOWNLOADS" "$ROOT/ohos-deps" "$OHOS_DEPS_PREFIX/notices"
+BUILD_ROOT=$(mktemp -d "$ROOT/ohos-deps/build.XXXXXX")
+export OHOS_HOST OHOS_ABI OHOS_DEPS_PREFIX OHOS_NDK_HOME
+OHOS_BUILD=$("$ROOT/config.guess")
+export OHOS_BUILD
+JOBS=${JOBS:-8}
+for spec in \
+  'expat-2.5.0.tar.bz2|https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.bz2' \
+  'zlib-1.3.1.tar.gz|https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz' \
+  'c-ares-1.21.0.tar.gz|https://github.com/c-ares/c-ares/releases/download/cares-1_21_0/c-ares-1.21.0.tar.gz' \
+  'libssh2-1.11.0.tar.bz2|https://libssh2.org/download/libssh2-1.11.0.tar.bz2' \
+  'OpenSSL-LICENSE.txt|https://raw.githubusercontent.com/openssl/openssl/b372b1f76450acdfed1e2301a39810146e28b02c/LICENSE'
+do
+  filename=${spec%%|*}
+  url=${spec#*|}
+  if [ ! -f "$DOWNLOADS/$filename" ]; then
+    curl -fL --retry 2 -o "$DOWNLOADS/$filename" "$url"
+  fi
+done
+(cd "$DOWNLOADS" && shasum -a 256 -c "$ROOT/ohos/dependencies.sha256")
+git -C "$OHOS_OPENSSL_REPO" cat-file -e "$OPENSSL_REF^{commit}"
+git -C "$OHOS_OPENSSL_REPO" archive "$OPENSSL_REF" "prelude/$OHOS_ABI" |
+  tar -xf - -C "$OHOS_DEPS_PREFIX" --strip-components=2
+grep -q 'OpenSSL 1\.1' "$OHOS_DEPS_PREFIX/include/openssl/opensslv.h"
+cp "$DOWNLOADS/OpenSSL-LICENSE.txt" "$OHOS_DEPS_PREFIX/notices/"
+# Static inputs are explicitly selected. No dependency branch/file is modified.
+git -C "$OHOS_OPENSSL_REPO" show "$OPENSSL_REF:LICENSE" > "$OHOS_DEPS_PREFIX/notices/ohos-openssl-MIT.txt"
+for pc in "$OHOS_DEPS_PREFIX"/lib/pkgconfig/*.pc; do
+  sed "s|^prefix=.*|prefix=$OHOS_DEPS_PREFIX|" "$pc" > "$pc.tmp"
+  mv "$pc.tmp" "$pc"
+done
+for archive in expat-2.5.0.tar.bz2 zlib-1.3.1.tar.gz c-ares-1.21.0.tar.gz libssh2-1.11.0.tar.bz2; do
+  tar -xf "$DOWNLOADS/$archive" -C "$BUILD_ROOT"
+done
+for dependency in expat-2.5.0 c-ares-1.21.0 libssh2-1.11.0; do
+  find "$BUILD_ROOT/$dependency" -name config.sub -exec cp "$ROOT/config.sub" {} \;
+  find "$BUILD_ROOT/$dependency" -name config.guess -exec cp "$ROOT/config.guess" {} \;
+done
+cd "$BUILD_ROOT/expat-2.5.0"
+"$ROOT/ohos/generic-config" --without-docbook --without-xmlwf --without-examples --without-tests
+make -j"$JOBS" install
+cp COPYING "$OHOS_DEPS_PREFIX/notices/expat-COPYING.txt"
+cd "$BUILD_ROOT/zlib-1.3.1"
+"$ROOT/ohos/zlib-config"
+make -j"$JOBS" install
+cp LICENSE "$OHOS_DEPS_PREFIX/notices/zlib-LICENSE.txt"
+cd "$BUILD_ROOT/c-ares-1.21.0"
+"$ROOT/ohos/generic-config" --disable-tests
+make -j"$JOBS" install
+cp LICENSE.md "$OHOS_DEPS_PREFIX/notices/c-ares-LICENSE.txt"
+cd "$BUILD_ROOT/libssh2-1.11.0"
+"$ROOT/ohos/generic-config" --with-crypto=openssl --with-libssl-prefix="$OHOS_DEPS_PREFIX" --disable-examples-build
+make -j"$JOBS" install
+cp COPYING "$OHOS_DEPS_PREFIX/notices/libssh2-COPYING.txt"
+git -C "$OHOS_OPENSSL_REPO" show "$OPENSSL_REF:.gitmodules" > "$OHOS_DEPS_PREFIX/notices/openssl-source-location.txt"
+jq -n --arg ref "$OPENSSL_REF" --arg header "$(grep OPENSSL_VERSION_TEXT "$OHOS_DEPS_PREFIX/include/openssl/opensslv.h")" \
+  '{openssl:{port_revision:$ref,upstream_revision:"b372b1f76450acdfed1e2301a39810146e28b02c",version_header:$header,kind:"prebuilt static; PIC verified by final shared link",source_offer_status:"upstream source/patch archive still required before redistribution"},expat:"2.5.0",zlib:"1.3.1",cares:"1.21.0",libssh2:"1.11.0",checksum_trust:"first-download upstream URLs; not independently authenticated vendor hashes"}' \
+  > "$OHOS_DEPS_PREFIX/dependencies.json"
+cp "$ROOT/ohos/dependencies.sha256" "$OHOS_DEPS_PREFIX/notices/dependency-source-sha256.txt"
+echo "PIC dependencies built: $OHOS_DEPS_PREFIX; retained sources: $BUILD_ROOT"

@@ -1,7 +1,8 @@
 aria2 for OpenHarmony
 =====================
 
-This tree can cross-compile the ``aria2c`` command-line executable for:
+This tree cross-compiles shared ``libaria2.so`` (including ABI v1 C lifecycle
+entry points) and the compatible ``aria2c`` command-line executable for:
 
 * ``arm64-v8a`` (``aarch64-unknown-linux-ohos``)
 * ``armeabi-v7a`` (``armv7-unknown-linux-ohos``)
@@ -16,14 +17,27 @@ Requirements
 
 * OpenHarmony native SDK (``OHOS_NDK_HOME``)
 * Autotools: autoconf, automake, libtool, gettext, pkg-config
-* Static OpenSSL 1.1, expat, zlib, c-ares and libssh2 libraries installed
-  under one prefix. OpenSSL 1.1 can be staged from the ``origin/111`` branch
-  of the local ``ohos-openssl`` repository.
+* PIC static OpenSSL 1.1, expat, zlib, c-ares and libssh2 libraries installed
+  under one prefix, including notices and ``dependencies.json``.
+* curl, jq, Perl/shasum, tar and zip for reproducible staging/packaging.
 
 Like ``android-config``, ``ohos-config`` only configures aria2 and assumes its
 dependencies have already been built. The OpenHarmony SDK itself only
-provides zlib from this list. Use ``ohos/generic-config`` for Autoconf-based
-dependencies and ``ohos/zlib-config`` for zlib when preparing the prefix.
+provides zlib from this list. ``ohos/build-deps`` builds the baseline dependency
+versions as PIC without modifying the OpenSSL checkout. It pins the OpenSSL
+1.1 producer revision ``0f7849a999d3c69f8d2ed23bf5f8d680a2aac6be`` and validates
+the first-download SHA-256 pins in ``ohos/dependencies.sha256``. Those pins are
+not independently authenticated vendor digests. The baseline versions have not
+passed security/release review; this task does not upgrade them.
+
+The pinned producer's actual ``opensslv.h`` reports
+``OpenSSL 1.1.1x-dev  xx XXX xxxx`` and ``OPENSSL_VERSION_NUMBER=0x10101180L``;
+it is not the released 1.1.1w. Both native and Docker metadata derive
+``version_header`` from that header rather than assigning a release label.
+Staging validates the pinned header and exact upstream-license bytes, records
+their hashes, and uses revision-neutral ``OpenSSL-LICENSE.txt``. A retained
+prefix with the historical 1.1.1w notice filename is read only: only its new
+staged copy is normalized. No dependency source, binaries or ABI are changed.
 
 Build
 -----
@@ -31,23 +45,66 @@ Build
 ::
 
     export OHOS_NDK_HOME=/path/to/openharmony
-    export OHOS_DEPS_PREFIX=/path/to/ohos-dependencies/arm64-v8a
+    export OHOS_OPENSSL_REPO=/path/to/read-only/ohos-openssl
+    export OHOS_DEPS_PREFIX=/path/to/fresh/ohos-dependencies/arm64-v8a
+    LIBTOOLIZE=glibtoolize autoreconf -fi   # macOS; use libtoolize on Linux
+    ./ohos/build-deps
     ./ohos-config aarch64
 
 Repeat with ``armv7`` or ``x86_64`` when those ABIs are needed. Artifacts
-are written to ``ohos-out/<abi>/aria2c``.
+are written to ``ohos-out/<abi>``. Fresh build directories are retained under
+``ohos-build/<abi>/run.*``; no existing directory is recursively deleted.
+Existing outputs/prefixes are rejected. To rebuild, choose fresh
+``OHOS_OUT_DIR`` and ``OHOS_DEPS_PREFIX`` (or reuse an already validated prefix
+without rerunning ``build-deps``). ``OHOS_BUILD_DIR`` may explicitly select a
+fresh build directory.
+
+Library sources and all static inputs use PIC; PIE applies only to CLI main/link.
+The CLI statically embeds the engine, preserving its lack of a libaria2 runtime
+dependency; both deliverables require the packaged C++ runtime.
+The OHOS shared target uses the unversioned SONAME ``libaria2.so`` so the final
+HAP can carry that exact filename. The compiler's ordinary ``libaria2.so``
+output is staged directly as the ordinary file ``lib/libaria2.so``. Delivery
+and packages forbid symlinks, versioned library files and a top-level
+convenience alias; no unpack-time dereferencing is needed. HAP packagers must
+copy this file to their ABI library path and package the observed
+``libc++_shared.so`` runtime as well; final HAP/device loading is still a
+separate, unperformed acceptance gate. ``libc.so`` is supplied by OHOS.
 
 Package one built ABI with::
 
     ./ohos-release aarch64
 
+Both ZIP and tar.gz contain the same ordinary-file native layout. Symlink or
+versioned-library inputs are rejected before packaging. Packages, extracted staging
+directories and package hashes are retained under ``ohos-packages``. Set a fresh
+``BUILD_VER`` or ``OHOS_PACKAGE_DIR`` for another package. They contain headers,
+native runtimes, third-party notices, SHA256SUMS, ``artifact-manifest.json``, ELF
+reports, base revision/dirty diff and a build-source snapshot. The post-build
+implementation evidence report is excluded from the source hash/snapshot to
+avoid self-referential final-hash reporting.
+The OpenSSL prebuilt producer's upstream source/patch offer must still be
+completed before redistribution; included MIT producer notices are not a
+substitute for the OpenSSL 1.1 license. No G0/security/release PASS is implied.
+
+Run the native-file layout regression test against a built output::
+
+    ./ohos/artifact-layout-test /absolute/path/to/ohos-out/arm64-v8a \
+      "$OHOS_NDK_HOME" aarch64-unknown-linux-ohos arm64-v8a
+
+This verifies ordinary-file layout and that manifest/package generation rejects
+library or unrelated symlinks, versioned library files and top-level aliases.
+It retains invalid test copies in isolated temporary directories and never
+rewrites the input artifact.
+
 Docker
 ------
 
-``Dockerfile.ohos`` builds the arm64 dependencies, aria2c and the release ZIP.
+``Dockerfile.ohos`` builds PIC arm64 dependencies, the shared library, CLI and
+release packages using the same scripts.
 It requires a Linux x86_64 OpenHarmony native SDK and the local
 ``ohos-openssl`` repository as BuildKit contexts. The OpenSSL context must
-include its Git metadata and the ``origin/111`` ref::
+include its Git metadata and the pinned OpenSSL producer commit above::
 
     docker buildx build --platform linux/amd64 \
       --build-context ohos-sdk=/path/to/linux/openharmony \
@@ -55,16 +112,111 @@ include its Git metadata and the ``origin/111`` ref::
       --output type=local,dest=ohos-docker-out \
       -f Dockerfile.ohos .
 
-The release ZIP is written to ``ohos-docker-out``.
+The release packages are written to ``ohos-docker-out``. A macOS DevEco LLVM
+toolchain is Mach-O and cannot be used in this Linux container: use a Linux SDK
+context, or cross-build directly on macOS using its native SDK. This task's
+actual artifact uses the macOS SDK; the Docker path is not independently run.
+Docker excludes .git and generated builds/downloads. Its manifest records the
+declared ARIA2_SOURCE_BASE_REVISION separately from the full context hash; it
+does not pretend an uncommitted worktree context is a clean immutable commit.
+
+C ABI lifecycle
+---------------
+
+Include ``<aria2/aria2_c.h>``; compile the consumer as C or call the five
+unmangled exported symbols from Rust. No C++ or Rust allocator type crosses
+this local boundary. It is NOT a child-process entry, IPC layer or process API.
+
+1. ``aria2_c_initialize(options, count, &owner)`` initializes global dependencies
+   and one keep-running session with signal handling disabled.
+2. Repeatedly call ``aria2_c_run_once(owner, &running)`` on that same owner
+   thread. This uses upstream RUN_ONCE: its idle poll is up to about one second,
+   and internal no-wait draining/file I/O means there is no hard wall-clock
+   deadline. A Rust child must keep its control-channel listener separate and
+   deliver shutdown intent to the owner between iterations, never call Session
+   APIs from another thread.
+3. Request graceful shutdown with ``aria2_c_shutdown(owner, 0)``. Continue
+   iterating until running is zero. The owner may escalate to ``force=1`` after
+   its caller-owned deadline; a stuck native call still requires external
+   child termination. Shutdown does not join or finalize automatically.
+4. ``aria2_c_finalize(&owner, &engine_result)`` releases the session, global
+   library and handle, clearing owner. It rejects a live session. After an
+   ENGINE_ERROR it permits cleanup but does not promise a flushed session.
+
+Always check status before reading output values. Engine result is separate
+from the C ABI status. Exceptions are caught at every fallible exported
+boundary; fatal OS signals, invalid caller memory and noexcept-destructor aborts
+are not recoverable exceptions. No diagnostic string is returned, preventing
+accidental logging of private options.
+
+One global lifecycle per process only; mixing with aria2c or the C++ API in the
+same process is forbidden. Input prevalidation errors have not consumed global
+initialization and may be corrected/retried. Once libraryInit is attempted,
+initialization failure or successful finalize requires a NEW process for any
+restart. initialize then returns ARIA2_C_PROCESS_RESTART_REQUIRED without
+accessing the freed upstream preference globals. INIT_FAILED means initialization
+consumed the lifecycle; post-init exceptions also report PROCESS_RESTART_REQUIRED.
+Do not retry a bind failure by reinitializing in the same process. All lifecycle
+operations must run on the creating thread.
+The facade rejects concurrent calls (BUSY) and other threads (WRONG_THREAD);
+its mutex is not a promise that upstream Session calls are thread-safe. Handles
+cannot be copied as ownership and are invalid after finalize. The caller must
+provide valid readable NUL-terminated strings and writable output pointers;
+the library cannot validate arbitrary memory addresses. Strings are copied
+synchronously; caller memory can be released after initialize returns.
+Limits: 256 distinct options, 128-byte names, 65,536-byte values, 1 MiB aggregate.
+Unknown/invalid options fail without echoing their values. Global console sinks
+discard output; no config file is read and no file/console logger is enabled.
+
+RPC requires ``enable-rpc=true``, caller-selected ``rpc-listen-port`` in
+1024..65535 and ``rpc-secret`` of 32..1024 printable, non-whitespace bytes.
+The caller owns entropy, collision detection and retry/port discovery; port 0
+is not supported. Initialize is not a Ready signal: authenticated loopback
+health probing remains the caller's responsibility. The facade always forces
+``rpc-listen-all=false`` and rejects a requested public listener, config/log
+override or obsolete username/password. Secrets travel only through in-memory
+options, never argv/config/log. The upstream C++ option/session strings are
+ordinary allocations, so secure heap zeroization is NOT guaranteed. Caller
+buffers should use their own zeroizing storage. Session-save files may contain
+download URLs; credential-bearing URL recovery needs a separately accepted
+encrypted-source contract and is not solved by this lifecycle ABI.
+
+Owner tests::
+
+    ./ohos/host-c-api-test
+
+This compiles ``test/aria2_c_lifecycle.c`` with ``cc -std=c11`` (not C++), links
+to the real shared library, checks validation, 100 independent process lifecycles, single
+instance/thread/signal rules and unauthenticated/authenticated loopback RPC.
+An independent process checks session-initialization failure and subsequent
+restart-required rejection; pure validation failures permit corrected input.
+It also checks stable same-process reinitialization rejection after finalize;
+it does not claim upstream global reentrancy. Host builds disable TLS only for these lifecycle tests; the actual OHOS artifact
+enables the baseline OpenSSL 1.1 feature set.
+
+API compatibility
+-----------------
+
+The intended consumer minimum is API22 and target SDK is API26. The available
+SDK contains a single API26 sysroot without an independently verified API22
+symbol baseline. Therefore the generated manifest explicitly records requested
+minimum 22, validated minimum null and API22 status MISSING. Successful SDK26
+linking, or later Phone API26 smoke, does not prove API22. Final API22 undefined
+symbol audit and target-device shared loading/lifecycle/RPC/storage/soak remain
+independent producer/consumer acceptance work. Do not advertise release
+compatibility until those pass.
 
 Run
 ---
 
-Copy the matching binary to a device and run it from a shell::
+The CLI requires its matching C++ runtime. An example
+manual smoke command (not executed by this implementation task)::
 
     hdc file send ohos-out/arm64-v8a/aria2c /data/local/tmp/aria2c
+    hdc file send ohos-out/arm64-v8a/lib/libaria2.so /data/local/tmp/libaria2.so
+    hdc file send ohos-out/arm64-v8a/lib/libc++_shared.so /data/local/tmp/libc++_shared.so
     hdc shell chmod 755 /data/local/tmp/aria2c
-    hdc shell /data/local/tmp/aria2c -v
+    hdc shell 'LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/aria2c -v'
 
 Notes
 -----

@@ -1,6 +1,9 @@
 SUBDIRS = includes
 bin_PROGRAMS = aria2c
 aria2c_SOURCES = main.cc
+aria2c_LDFLAGS = $(AM_LDFLAGS) @ARIA2_CLI_LDFLAGS@
+aria2c_CXXFLAGS = $(AM_CXXFLAGS) @ARIA2_CLI_CXXFLAGS@
+aria2c_LDADD = $(LDADD) @ARIA2_CLI_LIBS@
 SRCS =  \
 	a2algo.h\
 	a2functional.h\
@@ -688,12 +691,14 @@ lib_LTLIBRARIES = libaria2.la
 SRCS += \
 	ApiCallbackDownloadEventListener.cc ApiCallbackDownloadEventListener.h\
 	aria2api.cc aria2api.h \
+	aria2capi.cc \
 	KeepRunningCommand.cc KeepRunningCommand.h
 else # !ENABLE_LIBARIA2
 noinst_LTLIBRARIES = libaria2.la
 endif # !ENABLE_LIBARIA2
 
 libaria2_la_SOURCES = $(SRCS)
+libaria2_la_LDFLAGS = @LIBARIA2_VERSION_FLAGS@
 
 
 AM_CPPFLAGS = \
@@ -752,4 +757,3 @@ endif # !ENABLE_LIBARIA2
 AM_CFLAGS = @EXTRACFLAGS@
 
 AM_CXXFLAGS = @WARNCXXFLAGS@ @CXX1XCXXFLAGS@ @EXTRACXXFLAGS@
-
